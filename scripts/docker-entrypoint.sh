@@ -103,6 +103,7 @@ fi
 
 # ---- Run phase ----
 kill $LOADING_PID 2>/dev/null || true
+wait $LOADING_PID 2>/dev/null || true
 trap - EXIT
 
 if [[ -n "$OSC_ENTRY" ]]; then
