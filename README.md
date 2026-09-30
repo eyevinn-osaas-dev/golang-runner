@@ -20,6 +20,7 @@ golang-runner clones your Go repository, builds a static binary using `go build`
 | `OSC_BUILD_CMD` | No | Override the auto-detected build command. Example: `go build -tags netgo -o /app/server ./cmd/api`. |
 | `OSC_ENTRY` | No | Override the binary to execute after build. Default: `/app/server`. |
 | `OSC_ACCESS_TOKEN` | No | OSC runner token for authenticating with the config service. |
+| `CONFIG_API_KEY` | No | API key for encrypted parameter store. When set alongside `OSC_ACCESS_TOKEN` and `CONFIG_SVC`, secret parameters are decrypted before being injected as environment variables. |
 | `CONFIG_SVC` | No | OSC config service endpoint for loading environment variables at startup. |
 
 ## Go Project Auto-Detection
