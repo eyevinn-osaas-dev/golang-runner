@@ -147,23 +147,20 @@ fi
 cd "$BUILD_DIR"
 mkdir -p /app
 
+# set -e is active: every build command must tolerate failure (|| BUILD_EXIT=$?)
+# so a failed build reaches the failed-mode branch below instead of aborting.
 BUILD_EXIT=0
 if [[ -n "$OSC_BUILD_CMD" ]]; then
-  eval "$OSC_BUILD_CMD"
-  BUILD_EXIT=$?
+  eval "$OSC_BUILD_CMD" || BUILD_EXIT=$?
 elif [[ -f "cmd/server/main.go" ]]; then
-  go build -o /app/server ./cmd/server
-  BUILD_EXIT=$?
+  go build -o /app/server ./cmd/server || BUILD_EXIT=$?
 elif ls cmd/*/main.go 1>/dev/null 2>&1; then
   CMD_DIR=$(dirname "$(ls cmd/*/main.go | head -1)")
-  go build -o /app/server "./$CMD_DIR"
-  BUILD_EXIT=$?
+  go build -o /app/server "./$CMD_DIR" || BUILD_EXIT=$?
 elif [[ -f "main.go" ]]; then
-  go build -o /app/server .
-  BUILD_EXIT=$?
+  go build -o /app/server . || BUILD_EXIT=$?
 else
-  go build -o /app/server ./...
-  BUILD_EXIT=$?
+  go build -o /app/server ./... || BUILD_EXIT=$?
 fi
 
 if [[ $BUILD_EXIT -ne 0 ]]; then
