@@ -13,6 +13,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Hide a platform-written file from `git status` without touching tracked files.
+exclude_from_git_status() {
+  local repo_dir="$1" name="$2" excl
+  excl="$(git -C "$repo_dir" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
+  [ -n "$excl" ] || return 0
+  # git prints this path relative to the -C directory, not to this script's cwd (/runner)
+  case "$excl" in /*) ;; *) excl="$repo_dir/$excl" ;; esac
+  mkdir -p "$(dirname "$excl")" 2>/dev/null || return 0
+  grep -qxF "$name" "$excl" 2>/dev/null || echo "$name" >> "$excl" 2>/dev/null || true
+}
+
 # Write commit metadata to a well-known file for platform visibility
 write_commit_info() {
   local repo_dir="$1"
@@ -41,6 +52,7 @@ write_commit_info() {
       --argjson recentCommits "$recentCommits" \
       '{sha:$sha,shortSha:$shortSha,message:$message,author:$author,date:$date,recentCommits:$recentCommits}' \
       > "$repo_dir/.commit-info.json" 2>/dev/null || true
+    exclude_from_git_status "$repo_dir" .commit-info.json
     echo "Commit info: $(jq -r '.shortSha + " - " + .message' "$repo_dir/.commit-info.json" 2>/dev/null || echo 'unavailable')"
   fi
 }
