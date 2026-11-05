@@ -124,24 +124,91 @@ if [[ -n "${OSC_ACCESS_TOKEN:-}" && -n "${OSC_ENV:-}" ]]; then
   fi
 fi
 
+# BEGIN config-load
 if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
   echo "[CONFIG] Loading environment variables from config service '$CONFIG_SVC'"
-  if config_env_output=$(timeout 60s npx -y "@osaas/cli@${OSAAS_CLI_VERSION:?OSAAS_CLI_VERSION must be set (pinned in the Dockerfile)}" web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" 2>&1); then
+  # NOTE: this script runs under `set -e`. A plain `x=$(cmd)` assignment
+  # propagates a non-zero command-substitution exit status and terminates the
+  # script immediately, before `config_exit=$?` on the next line is ever read.
+  # The same applies to `valid_exports=$(... | grep ...)` when grep matches
+  # nothing (exit 1). Every substitution below therefore has an explicit
+  # `|| fallback` so the exit handling is actually reached instead of the
+  # container dying silently (and the EXIT trap taking /healthz down with it).
+  config_max_attempts=3
+  config_attempt=1
+  config_failed=0
+  config_fail_reason=""
+  config_exit=0
+  config_env_output=""
+  config_err_output=""
+  valid_exports=""
+  config_out_file=$(mktemp)
+  config_err_file=$(mktemp)
+  while true; do
+    config_failed=0
     config_exit=0
-  else
-    config_exit=$?
-  fi
-  if [ $config_exit -eq 0 ]; then
-    valid_exports=$(echo "$config_env_output" | grep "^export [A-Za-z_][A-Za-z0-9_]*=")
-    if [ -n "$valid_exports" ]; then
-      eval "$valid_exports"
-      var_count=$(echo "$valid_exports" | wc -l | tr -d ' ')
-      echo "[CONFIG] Loaded $var_count environment variable(s)"
+    valid_exports=""
+    timeout 60s npx -y "@osaas/cli@${OSAAS_CLI_VERSION:?OSAAS_CLI_VERSION must be set (pinned in the Dockerfile)}" web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" >"$config_out_file" 2>"$config_err_file" || config_exit=$?
+    config_env_output=$(cat "$config_out_file") || config_env_output=""
+    config_err_output=$(cat "$config_err_file") || config_err_output=""
+    if [ $config_exit -eq 124 ]; then
+      config_failed=1
+      config_fail_reason="config-to-env timed out after 60s"
+    elif [ $config_exit -ne 0 ]; then
+      config_failed=1
+      config_fail_reason="exit code $config_exit"
+    else
+      # Only eval lines that are valid shell export statements to prevent
+      # executing error messages or malformed output as shell commands
+      valid_exports=$(echo "$config_env_output" | grep "^export [A-Za-z_][A-Za-z0-9_]*=") || valid_exports=""
+      if [ -z "$valid_exports" ] && [ -n "$config_env_output" ]; then
+        config_failed=1
+        config_fail_reason="config service returned output with no valid export statements"
+      fi
     fi
+    if [ $config_failed -eq 0 ]; then
+      break
+    fi
+    # Auth and not-found failures are permanent: do not retry
+    if echo "$config_env_output $config_err_output" | grep -qi "expired\|unauthorized\|401\|not found\|404"; then
+      break
+    fi
+    if [ $config_attempt -ge $config_max_attempts ]; then
+      break
+    fi
+    echo "[CONFIG] WARNING: Failed to load config (attempt $config_attempt/$config_max_attempts: $config_fail_reason) - retrying in 3s" >&2
+    config_attempt=$((config_attempt + 1))
+    sleep 3
+  done
+  rm -f "$config_out_file" "$config_err_file"
+
+  if [ $config_failed -eq 1 ]; then
+    # Never print parameter values: drop export lines from the logged output
+    config_safe_output=$(printf '%s\n%s\n' "$config_env_output" "$config_err_output" | grep -v "^export [A-Za-z_][A-Za-z0-9_]*=" | tr '\n' ' ') || config_safe_output=""
+    echo "[CONFIG] ERROR: Failed to load config from '$CONFIG_SVC' ($config_fail_reason, exit code $config_exit): $config_safe_output" >&2
+    if echo "$config_env_output $config_err_output" | grep -qi "expired\|unauthorized\|401"; then
+      echo "[CONFIG] Action required: Your OSC_ACCESS_TOKEN may have expired." >&2
+      echo "[CONFIG] Use the 'refresh-app-config' MCP tool to issue a fresh token." >&2
+    fi
+    echo "[CONFIG] Not starting the application without its configuration." >&2
+    # Enter the loading server's failed state (/healthz 500 build-failed, / 503)
+    # instead of `exit 1`: the EXIT trap would kill the loading server and make
+    # /healthz unreachable.
+    kill $LOADING_PID 2>/dev/null || true
+    wait $LOADING_PID 2>/dev/null || true
+    trap - EXIT
+    exec node /runner/loading-server.js error-page.html failed
+  fi
+
+  if [ -n "$valid_exports" ]; then
+    eval "$valid_exports"
+    var_count=$(echo "$valid_exports" | wc -l | tr -d ' ')
+    echo "[CONFIG] Loaded $var_count environment variable(s)"
   else
-    echo "[CONFIG] ERROR: Failed to load config (exit $config_exit): $config_env_output" >&2
+    echo "[CONFIG] Config service '$CONFIG_SVC' has no parameters"
   fi
 fi
+# END config-load
 
 # ---- Build phase ----
 cd "$BUILD_DIR"

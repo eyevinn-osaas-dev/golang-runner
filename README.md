@@ -92,6 +92,8 @@ Once the build succeeds, the loading server is stopped and your Go binary takes 
 
 If both `OSC_ACCESS_TOKEN` and `CONFIG_SVC` are set, the runner loads environment variables from the OSC config service before building. This allows secrets and runtime configuration to be managed through the OSC platform rather than being passed as container environment variables.
 
+If the config cannot be loaded the application does not start without its configuration. The load is attempted up to 3 times with a 3 s backoff (authentication and not-found errors are not retried). A timeout (60 s per attempt), a non-zero exit, or output with no valid `export` lines counts as a failure. The runner then logs a `[CONFIG] ERROR` line (without parameter values), never reaches the build phase, and the loading server enters its failed state (`/healthz` returns `500 {"status":"build-failed"}`). If the token has expired, the log also points to the `refresh-app-config` MCP tool. An empty config store (no parameters) is not a failure: the runner logs a no-parameters line and continues. If `CONFIG_SVC` is set without `OSC_ACCESS_TOKEN`, config loading is skipped.
+
 ## Docker Images
 
 The image is built on `alpine:3.21` and includes:

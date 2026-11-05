@@ -24,28 +24,28 @@ for f in Dockerfile Dockerfile.osc; do
   fi
 done
 
-# Extract the npx invocation line and run it with stub npx/timeout binaries.
-LINE=$(grep -m1 'timeout 60s npx -y' "$ENTRYPOINT" | sed -E 's/^ *if //; s/; then *$//')
-STUB=$(mktemp -d)
-printf '#!/bin/sh\necho "NPX:$*"\n' > "$STUB/npx"
-printf '#!/bin/sh\nshift\nexec "$@"\n' > "$STUB/timeout"
-chmod +x "$STUB/npx" "$STUB/timeout"
-
-# Passing path: the pinned spec is used
-out=$(env -i PATH="$STUB:$PATH" OSAAS_CLI_VERSION=4.35.0 CONFIG_SVC=store bash -c "$LINE; echo \"\$config_env_output\"" 2>&1)
-if echo "$out" | grep -qF 'NPX:-y @osaas/cli@4.35.0 web'; then
-  pass "npx uses the pinned @osaas/cli spec"
+# Extract the package-spec expansion used by the npx call (the call itself
+# redirects into temp files, so it is not run standalone).
+expr=$(grep -m1 'timeout 60s npx -y' "$ENTRYPOINT" | grep -o '"@osaas/cli@\${OSAAS_CLI_VERSION:?[^}]*}"')
+if [ -z "$expr" ]; then
+  fail "could not extract the version expansion from the entrypoint"
 else
-  fail "npx did not use the pinned spec: $out"
-fi
+  # Passing path: the pinned spec is what npx receives
+  got=$(env -i OSAAS_CLI_VERSION=4.35.0 bash -c "echo $expr" 2>&1)
+  if [ "$got" = "@osaas/cli@4.35.0" ]; then
+    pass "npx uses the pinned @osaas/cli spec"
+  else
+    fail "npx did not use the pinned spec: $got"
+  fi
 
-# Failing path: an unset version fails fast without running npx
-out=$(env -i PATH="$STUB:$PATH" CONFIG_SVC=store bash -c "if $LINE; then echo reached; else echo failed; fi" 2>&1)
-rc=$?
-if echo "$out" | grep -q "^failed" && ! echo "$out" | grep -q "NPX:" && echo "$out" | grep -q 'OSAAS_CLI_VERSION'; then
-  pass "unset OSAAS_CLI_VERSION fails fast"
-else
-  fail "unset OSAAS_CLI_VERSION did not fail fast (rc=$rc): $out"
+  # Failing path: an unset version fails fast without running npx
+  out=$(env -i bash -c "echo $expr" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && echo "$out" | grep -q 'OSAAS_CLI_VERSION'; then
+    pass "unset OSAAS_CLI_VERSION fails fast"
+  else
+    fail "unset OSAAS_CLI_VERSION did not fail fast (rc=$rc): $out"
+  fi
 fi
 
 rm -rf "$STUB"
