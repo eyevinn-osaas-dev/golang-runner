@@ -126,15 +126,76 @@ if [[ -z "${OSC_ENV:-}" && -n "${OSC_MCP_URL:-}" ]]; then
   OSC_ENV=${_extracted:-prod}
 fi
 
+# BEGIN runner-refresh
+# Exchange the runner refresh token for a fresh 1h PAT used ONLY by
+# config-to-env. The app keeps today's OSC_ACCESS_TOKEN (Stage 2 of
+# python-runner#39 is gated on the REJECT_RUNNER_REFRESH_TOKENS rollout) and
+# additionally receives the original token as OSC_REFRESH_TOKEN.
+# The fresh token is kept in a NON-exported shell variable and never assigned
+# to OSC_ACCESS_TOKEN. The request body goes through a 0600 temp file so the
+# token never appears in curl's argv.
+config_access_token=""
 if [[ -n "${OSC_ACCESS_TOKEN:-}" && -n "${OSC_ENV:-}" ]]; then
-  _refreshed=$(curl -sf -X POST \
-    "https://token.svc.${OSC_ENV:-prod}.osaas.io/runner-token/refresh" \
-    -H "Authorization: Bearer ${OSC_ACCESS_TOKEN}" \
-    -H "Content-Type: application/json" || true)
-  if [[ -n "${_refreshed}" ]]; then
-    OSC_ACCESS_TOKEN=$(echo "$_refreshed" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "$OSC_ACCESS_TOKEN")
+  refresh_http=""
+  refresh_json=""
+  refresh_code=""
+  for refresh_attempt in 1 2 3; do
+    refresh_body_file=$(mktemp)
+    chmod 600 "$refresh_body_file"
+    printf '{"token":"%s"}' "$OSC_ACCESS_TOKEN" > "$refresh_body_file"
+    refresh_raw=$(curl -s --max-time 10 -w "\n%{http_code}" -X POST \
+      "https://token.svc.${OSC_ENV}.osaas.io/runner-token/refresh" \
+      -H "Content-Type: application/json" \
+      --data @"$refresh_body_file" 2>/dev/null) || refresh_raw=""
+    rm -f "$refresh_body_file"
+    refresh_http=$(echo "$refresh_raw" | tail -n 1)
+    refresh_json=$(echo "$refresh_raw" | sed '$d')
+    # 200 and 401 are definitive; only transient failures are retried.
+    if [ "$refresh_http" = "200" ] || [ "$refresh_http" = "401" ]; then
+      break
+    fi
+    if [ "$refresh_attempt" -lt 3 ]; then
+      sleep 3
+    fi
+  done
+
+  refresh_outcome="failed"
+  if [ "$refresh_http" = "200" ]; then
+    # jq may be missing or fail: any failure leaves the result empty, which
+    # is treated as a failed exchange.
+    refresh_token=$(echo "$refresh_json" | jq -r '.token // empty' 2>/dev/null) || refresh_token=""
+    if [ -n "$refresh_token" ]; then
+      config_access_token="$refresh_token"
+      refresh_outcome="ok"
+    fi
+    unset refresh_token
+  elif [ "$refresh_http" = "401" ]; then
+    refresh_code=$(echo "$refresh_json" | jq -r '.code // empty' 2>/dev/null) || refresh_code=""
+    case "$refresh_code" in
+      refresh_token_expired|refresh_token_revoked) refresh_outcome="expired" ;;
+      refresh_token_invalid) refresh_outcome="invalid" ;;
+    esac
   fi
+
+  case "$refresh_outcome" in
+    ok)
+      echo "[CONFIG] Refreshed access token via runner refresh token"
+      export OSC_REFRESH_TOKEN="$OSC_ACCESS_TOKEN"
+      ;;
+    expired)
+      echo "[CONFIG] WARNING: runner refresh token is $refresh_code"
+      ;;
+    invalid)
+      echo "[CONFIG] WARNING: OSC_ACCESS_TOKEN is not a runner refresh token, exchange skipped"
+      ;;
+    *)
+      echo "[CONFIG] WARNING: runner token exchange failed (HTTP '${refresh_http}'), using the original token"
+      export OSC_REFRESH_TOKEN="$OSC_ACCESS_TOKEN"
+      ;;
+  esac
+  unset refresh_http refresh_json refresh_raw refresh_outcome refresh_code
 fi
+# END runner-refresh
 
 # BEGIN config-load
 if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
@@ -160,7 +221,7 @@ if [[ -n "$OSC_ACCESS_TOKEN" && -n "$CONFIG_SVC" ]]; then
     config_failed=0
     config_exit=0
     valid_exports=""
-    timeout 60s npx -y "@osaas/cli@${OSAAS_CLI_VERSION:?OSAAS_CLI_VERSION must be set (pinned in the Dockerfile)}" web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" >"$config_out_file" 2>"$config_err_file" || config_exit=$?
+    OSC_ACCESS_TOKEN="${config_access_token:-$OSC_ACCESS_TOKEN}" timeout 60s npx -y "@osaas/cli@${OSAAS_CLI_VERSION:?OSAAS_CLI_VERSION must be set (pinned in the Dockerfile)}" web config-to-env ${OSC_ENV:+--env "$OSC_ENV"} "$CONFIG_SVC" >"$config_out_file" 2>"$config_err_file" || config_exit=$?
     config_env_output=$(cat "$config_out_file") || config_env_output=""
     config_err_output=$(cat "$config_err_file") || config_err_output=""
     if [ $config_exit -eq 124 ]; then

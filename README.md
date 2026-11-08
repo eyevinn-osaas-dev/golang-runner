@@ -20,6 +20,7 @@ golang-runner clones your Go repository, builds a static binary using `go build`
 | `OSC_BUILD_CMD` | No | Override the auto-detected build command. Example: `go build -tags netgo -o /app/server ./cmd/api`. |
 | `OSC_ENTRY` | No | Override the binary to execute after build. Default: `/app/server`. |
 | `OSC_ACCESS_TOKEN` | No | OSC runner token for authenticating with the config service. |
+| `OSC_REFRESH_TOKEN` | Set by the runner | Copy of the runner token the app received, set when `OSC_ACCESS_TOKEN` and `OSC_ENV` are available. Exchange it for a fresh 1 hour token with `POST https://token.svc.<env>.osaas.io/runner-token/refresh` (see below). |
 | `CONFIG_API_KEY` | No | API key for encrypted parameter store. When set alongside `OSC_ACCESS_TOKEN` and `CONFIG_SVC`, secret parameters are decrypted before being injected as environment variables. |
 | `CONFIG_SVC` | No | OSC config service endpoint for loading environment variables at startup. |
 
@@ -93,6 +94,24 @@ Once the build succeeds, the loading server is stopped and your Go binary takes 
 If both `OSC_ACCESS_TOKEN` and `CONFIG_SVC` are set, the runner loads environment variables from the OSC config service before building. This allows secrets and runtime configuration to be managed through the OSC platform rather than being passed as container environment variables.
 
 If the config cannot be loaded the application does not start without its configuration. The load is attempted up to 3 times with a 3 s backoff (authentication and not-found errors are not retried). A timeout (60 s per attempt), a non-zero exit, or output with no valid `export` lines counts as a failure. The runner then logs a `[CONFIG] ERROR` line (without parameter values), never reaches the build phase, and the loading server enters its failed state (`/healthz` returns `500 {"status":"build-failed"}`). If the token has expired, the log also points to the `refresh-app-config` MCP tool. An empty config store (no parameters) is not a failure: the runner logs a no-parameters line and continues. If `CONFIG_SVC` is set without `OSC_ACCESS_TOKEN`, config loading is skipped.
+
+The runner exchanges the runner token for a fresh 1 hour token at startup and uses that token to authenticate `config-to-env`. If the exchange fails, a `[CONFIG] WARNING` line is logged and the original token is used. The app still sees the original token in `OSC_ACCESS_TOKEN`.
+
+An app that needs a fresh token at runtime can exchange `OSC_REFRESH_TOKEN` itself:
+
+```go
+body, _ := json.Marshal(map[string]string{"token": os.Getenv("OSC_REFRESH_TOKEN")})
+resp, err := http.Post("https://token.svc.prod.osaas.io/runner-token/refresh", "application/json", bytes.NewReader(body))
+if err != nil {
+	return err
+}
+defer resp.Body.Close()
+var out struct {
+	Token     string `json:"token"`
+	ExpiresIn int    `json:"expiresIn"` // 3600
+}
+err = json.NewDecoder(resp.Body).Decode(&out)
+```
 
 ## Docker Images
 
